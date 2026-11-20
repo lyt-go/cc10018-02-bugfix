@@ -17,6 +17,7 @@ from app.engine.metric_calculator import MetricCalculator
 from app.engine.sql_binder import SqlTemplateBinder
 from app.engine.query_optimizer import QueryOptimizer
 from app.engine.export_sharder import ExportSharder
+from app.services.domain_mapping import domain_mapping_service
 
 
 class ChainOrchestrator:
@@ -45,29 +46,47 @@ class ChainOrchestrator:
     # 链路 1: 指标计算链
     # ───────────────────────────────────────────────
     def run_metric_compute_chain(self, domain_code: str, metric_code: str, aggregate_id: int) -> dict[str, Any]:
-        """指标计算链：数据源连接→指标域→派生指标→数据聚合。"""
+        """指标计算链：数据源连接→指标域→派生指标→数据聚合。
+
+        指标域不再取域表第一条，而是从指标域去重清单取唯一有效映射；计划的连接
+        或源表无法确认时，链路直接失败，不允许继续生成或执行计划。
+        """
         result = {"chain": "metric_compute", "steps": [], "ok": True}
 
-        # Step 1: 校验数据源连接
-        domain = next((r for r in store.rows("metric_domain") if r.get("域编号") == domain_code), None)
-        if not domain:
+        # Step 1: 按有效映射校验数据源连接
+        mapping = domain_mapping_service.resolve_effective(domain_code)
+        if not mapping:
             result["ok"] = False
-            result["steps"].append({"step": 1, "module": "datasource_connect", "status": "error", "detail": f"指标域 {domain_code} 不存在"})
+            result["steps"].append({"step": 1, "module": "datasource_connect", "status": "error", "detail": f"指标域 {domain_code} 没有可供新计算使用的有效映射"})
             return result
 
-        ds_table = domain.get("数据源表", "")
+        result["domain_mapping"] = mapping
+        result["source_table"] = mapping.get("数据源表", "")
+        ds_table = mapping.get("数据源表", "")
         ds = next((r for r in store.rows("datasource_connect") if r.get("数据库名") == ds_table or r.get("连接编号") == ds_table), None)
-        if not ds or ds.get("status") != "已连接":
-            result["steps"].append({"step": 1, "module": "datasource_connect", "status": "warning", "detail": "数据源未连接或不存在"})
-        else:
-            result["steps"].append({"step": 1, "module": "datasource_connect", "status": "ok", "detail": f"数据源 {ds.get('连接编号')} 已连接"})
+        if not mapping.get("连接可确认") or not ds or ds.get("status") != "已连接":
+            result["ok"] = False
+            result["steps"].append({
+                "step": 1, "module": "datasource_connect", "status": "error",
+                "detail": f"有效映射 {mapping.get('映射编号')} 的数据源 {ds_table} 连接无法确认，未执行计划",
+            })
+            return result
+        result["steps"].append({
+            "step": 1, "module": "datasource_connect", "status": "ok",
+            "detail": f"映射 {mapping.get('映射编号')}（{mapping.get('映射来源')}）→ {ds_table}，连接 {ds.get('连接编号')} 已连接",
+        })
 
-        # Step 2: 校验指标域
+        # Step 2: 校验指标域（以有效映射对应的域记录为准）
+        domain = next((r for r in store.rows("metric_domain") if int(r.get("id", 0)) == int(mapping.get("域记录id", 0))), None)
+        if not domain:
+            result["ok"] = False
+            result["steps"].append({"step": 2, "module": "metric_domain", "status": "error", "detail": f"有效映射 {mapping.get('映射编号')} 对应的域记录不存在"})
+            return result
         if domain.get("status") != "已启用":
             result["ok"] = False
             result["steps"].append({"step": 2, "module": "metric_domain", "status": "error", "detail": f"指标域状态为 {domain.get('status')}"})
             return result
-        result["steps"].append({"step": 2, "module": "metric_domain", "status": "ok", "detail": f"指标域 {domain_code} 已启用"})
+        result["steps"].append({"step": 2, "module": "metric_domain", "status": "ok", "detail": f"指标域 {domain_code} 已启用（映射 {mapping.get('映射编号')}）"})
 
         # Step 3: 校验并计算派生指标
         validation = self.calculator.validate_metric_chain(domain_code, metric_code)
@@ -86,9 +105,16 @@ class ChainOrchestrator:
             result["steps"].append({"step": 4, "module": "data_aggregate", "status": "error", "detail": f"聚合配置 {aggregate_id} 不存在"})
             return result
         if agg.get("status") != "已生效":
-            result["steps"].append({"step": 4, "module": "data_aggregate", "status": "warning", "detail": f"聚合配置状态为 {agg.get('status')}"})
+            result["steps"].append({"step": 4, "module": "data_aggregate", "status": "warning", "detail": f"聚合配置状态为 {agg.get('status')}，不生成可执行计划"})
         else:
             plan = self.calculator.build_compute_plan(aggregate_id)
+            if not plan.get("ok"):
+                result["ok"] = False
+                result["steps"].append({
+                    "step": 4, "module": "data_aggregate", "status": "error",
+                    "detail": "; ".join(plan.get("blocking_issues") or [plan.get("error", "计算计划不可执行")]),
+                })
+                return result
             result["steps"].append({"step": 4, "module": "data_aggregate", "status": "ok", "detail": f"聚合计划生成成功，共 {len(plan.get('steps', []))} 步"})
             result["compute_plan"] = plan
 
@@ -235,13 +261,13 @@ class ChainOrchestrator:
 
         result["steps"].append({"step": 1, "module": "metric_homonym", "status": "ok", "detail": f"指标 {hom.get('指标名称')} 已统一口径"})
 
-        # 检查是否已注册到指标域
+        # 检查是否已注册到指标域（以去重清单的有效映射为准）
         domain_code = hom.get("生效域", "")
-        domain = next((r for r in store.rows("metric_domain") if r.get("域编号") == domain_code), None)
-        if domain:
-            result["steps"].append({"step": 2, "module": "metric_domain", "status": "ok", "detail": f"口径已注册到域 {domain_code}"})
+        mapping = domain_mapping_service.resolve_effective(domain_code) if domain_code else None
+        if mapping:
+            result["steps"].append({"step": 2, "module": "metric_domain", "status": "ok", "detail": f"口径已注册到域 {domain_code}（有效映射 {mapping.get('映射编号')}）"})
         else:
-            result["steps"].append({"step": 2, "module": "metric_domain", "status": "warning", "detail": f"生效域 {domain_code} 未找到"})
+            result["steps"].append({"step": 2, "module": "metric_domain", "status": "warning", "detail": f"生效域 {domain_code} 未找到可用映射"})
 
         # 检查派生指标是否更新
         derived = next((r for r in store.rows("derived_metric") if r.get("指标编号") == hom.get("指标名称")), None)

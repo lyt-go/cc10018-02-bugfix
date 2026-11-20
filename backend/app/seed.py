@@ -20,6 +20,11 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
         {"id": 5, "status": "待校验", "pending": True, "abnormal": False,
          "域编号": "METR-LOGIS", "域名称": "物流域", "业务域描述": "发货、配送、签收时效相关指标",
          "数据源表": "dwd_logis_delivery_di", "更新频率": "每小时", "负责人": "孙七", "域状态": "待校验", "创建时间": "2026-10-25"},
+        # 存量重复：补录时未校验域编号唯一性，与 id=1 的 METR-TRADE 撞号且指向不同数据表。
+        {"id": 6, "status": "已启用", "pending": False, "abnormal": False,
+         "域编号": "METR-TRADE", "域名称": "交易域（补录）", "业务域描述": "补录的交易域，指向新版交易明细表",
+         "数据源表": "dwd_trade_order_v2_di", "更新频率": "每小时", "负责人": "张三", "域状态": "已启用",
+         "创建时间": "2026-10-18", "登记来源": "补录", "校验时间": "2026-10-20"},
     ],
     "derived_metric": [
         {"id": 1, "status": "已生效", "pending": False, "abnormal": False,
@@ -113,6 +118,9 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
         {"id": 4, "status": "已断开", "pending": False, "abnormal": True,
          "连接编号": "DS-MKT", "数据源类型": "PostgreSQL", "连接地址": "postgres://10.0.1.40:5432", "认证方式": "密码认证",
          "数据库名": "dwd_mkt_coupon_di", "连接池大小": "10", "连接超时": "15s", "最后校验": "2026-06-01 10:00:00"},
+        {"id": 5, "status": "已连接", "pending": False, "abnormal": False,
+         "连接编号": "DS-TRADE-V2", "数据源类型": "ClickHouse", "连接地址": "clickhouse://10.0.1.11:9000", "认证方式": "密码认证",
+         "数据库名": "dwd_trade_order_v2_di", "连接池大小": "20", "连接超时": "30s", "最后校验": "2026-11-16 08:00:00"},
     ],
     "call_trace": [
         {"id": 1, "status": "正常", "pending": False, "abnormal": False,
@@ -194,6 +202,22 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
         {"id": 4, "status": "待校验", "pending": True, "abnormal": False,
          "配置编号": "AGG-LOGIS-001", "数据来源": "METR-LOGIS", "聚合维度": "dt,warehouse_id", "聚合函数": "AVG(delivery_hours)",
          "过滤条件": "delivery_hours<168", "输出表名": "ads_logis_delivery_daily", "增量键": "dt", "更新策略": "增量覆盖"},
+    ],
+    # 历史聚合结果：生成时当时域表第一行是 id=1 的原登记映射，因此来源固定为原登记表。
+    # 裁决之后这条旧结果仍按自己的来源快照可查回，不被新判定的有效映射改写。
+    "data_aggregate_result": [
+        {"id": 1, "status": "已生成", "pending": False, "abnormal": False,
+         "结果编号": "AGG-TRADE-001-R001", "aggregate_id": 1, "配置编号": "AGG-TRADE-001",
+         "输出表名": "ads_trade_gmv_daily", "生成时间": "2026-11-15T02:00:00",
+         "计划来源指纹": "METR-TRADE=MAP-METR-TRADE-001",
+         "来源": [{"domain_code": "METR-TRADE", "mapping_code": "MAP-METR-TRADE-001", "domain_record_id": 1,
+                   "mapping_source": "原始登记", "source_table": "dwd_trade_order_di",
+                   "connection_code": "DS-TRADE", "connection_status": "已连接", "connection_confirmed": True,
+                   "usable": True}],
+         "来源表": ["dwd_trade_order_di"], "输出行数": 1,
+         "输出数据": [{"交易单号": "TRADE-A", "店铺": "SHOP-101", "订单金额": 100.0, "dt": "2026-11-10",
+                       "__domain": "METR-TRADE", "__mapping": "MAP-METR-TRADE-001",
+                       "__source_table": "dwd_trade_order_di", "__connection": "DS-TRADE"}]},
     ],
     "data_cleanse": [
         {"id": 1, "status": "已生效", "pending": False, "abnormal": False,

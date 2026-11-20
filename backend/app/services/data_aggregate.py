@@ -5,6 +5,7 @@ from typing import Any
 
 from app.store import store
 from app.engine.metric_calculator import MetricCalculator
+from app.services.domain_mapping import domain_mapping_service
 
 MODULE = "data_aggregate"
 LIST_FIELDS = ["配置编号", "数据来源", "聚合维度", "聚合函数", "过滤条件", "输出表名", "增量键", "更新策略"]
@@ -81,14 +82,16 @@ class DataAggregateService:
     def _validate_source(self, source: str) -> list[str]:
         errors = []
         calc = MetricCalculator()
-        for part in source.split(","):
+        for part in str(source).split(","):
             part = part.strip()
             if part.startswith("METR-"):
-                domain = next((r for r in store.rows("metric_domain") if r.get("域编号") == part), None)
-                if not domain:
-                    errors.append(f"指标域 {part} 不存在")
-                elif domain.get("status") != "已启用":
-                    errors.append(f"指标域 {part} 未启用")
+                mapping = domain_mapping_service.resolve_effective(part)
+                if mapping is None:
+                    errors.append(f"指标域 {part} 没有可供新计算使用的有效映射")
+                elif not mapping.get("可供新计算"):
+                    errors.append(
+                        f"指标域 {part} 的有效映射 {mapping.get('映射编号')} 连接无法确认"
+                    )
             elif part.startswith("DERI-"):
                 metric = calc.get_metric_by_code(part)
                 if not metric:
@@ -100,3 +103,16 @@ class DataAggregateService:
     def get_compute_plan(self, entry_id: int) -> dict[str, Any]:
         calc = MetricCalculator()
         return calc.build_compute_plan(entry_id)
+
+    def execute(self, entry_id: int) -> tuple[dict[str, Any] | None, str]:
+        """执行聚合计划；无法确认有效连接时拒绝执行。"""
+        entry = store.find(MODULE, entry_id)
+        if entry is None:
+            return None, f"聚合配置 {entry_id} 不存在或已归档"
+        if entry.get("status") != "已生效":
+            return None, f"聚合配置状态为 {entry.get('status')}，仅已生效配置可执行"
+        result = MetricCalculator().execute_compute_plan(entry_id)
+        if not result.get("ok"):
+            reasons = "；".join(result.get("blocking_issues") or [result.get("error", "计算计划不可执行")])
+            return None, f"无法确认有效连接，已拒绝执行：{reasons}"
+        return result, f"聚合计划已执行，结果 {result.get('result_code')}"

@@ -1,8 +1,14 @@
 """指标域管理业务规则：状态流转、字段校验与筛选口径都收在这里。"""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
+from app.services.domain_mapping import (
+    SOURCE_ORIGINAL,
+    domain_mapping_service,
+    normalize_code,
+)
 from app.store import store
 
 MODULE = "metric_domain"
@@ -38,17 +44,41 @@ class MetricDomainService:
         return store.find(MODULE, entry_id)
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        """登记指标域；域编号必须全平台唯一，重复登记直接拒绝。"""
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
         if missing:
-            return None, missing
+            return None, [f"缺少必填字段：{'、'.join(missing)}"]
+
+        domain_code = str(values.get("域编号") or "").strip()
+        duplicate = self.find_by_code(domain_code)
+        if duplicate is not None:
+            return None, [
+                f"域编号「{domain_code}」已由记录 id={duplicate.get('id')} 登记，不允许重复登记"
+            ]
+
         rows = store.rows(MODULE)
         entry = {"id": max((int(row.get("id", 0)) for row in rows), default=0) + 1}
         entry.update({field: values.get(field) for field in LIST_FIELDS})
         entry["status"] = STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
+        entry["域状态"] = STATUS_ORDER[0]
+        entry["创建时间"] = datetime.now().strftime("%Y-%m-%d")
+        entry["登记来源"] = SOURCE_ORIGINAL
+        entry["校验时间"] = ""
         rows.append(entry)
+        domain_mapping_service.ensure_mappings()
         return entry, []
+
+    def find_by_code(self, domain_code: str) -> dict[str, Any] | None:
+        """按比较口径（去空白、忽略大小写）查找已登记的指标域。"""
+        wanted = normalize_code(domain_code)
+        if not wanted:
+            return None
+        return next(
+            (row for row in store.rows(MODULE) if normalize_code(row.get("域编号")) == wanted),
+            None,
+        )
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
         entry = store.find(MODULE, entry_id)
@@ -62,4 +92,9 @@ class MetricDomainService:
         entry["status"] = target
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
+        entry["域状态"] = target
+        if action == "提交校验":
+            entry["校验时间"] = datetime.now().isoformat(timespec="seconds")
+        domain_mapping_service.ensure_mappings()
+        domain_mapping_service.reconcile()
         return entry, f"指标域已{action}"

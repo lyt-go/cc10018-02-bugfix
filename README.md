@@ -75,5 +75,26 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 指标域去重与聚合来源
+
+指标域的「域编号」全平台唯一：`POST /api/metric_domain` 遇到已存在的域编号
+（忽略首尾空白与大小写）会直接拒绝登记。历史存量里已经存在的重复域，
+通过映射裁决收敛为「一个编号只有一个可用于新计算的映射」：
+
+- `GET /api/metric_domain/mapping/dedup-list`：指标域去重清单，给出每个域编号的
+  有效映射、连接、源表、冲突说明，并保留全部历史映射；
+- `POST /api/metric_domain/mapping/adjudicate`：批量检查并落定裁决，重复调用结果一致；
+- `GET /api/metric_domain/mapping/{映射编号}`：按映射编号追溯来源。
+
+裁决规则：校验通过的映射中取校验时间最新的一条作为唯一有效映射，其余标记为
+「历史」但不删除。选择只看校验时间、不看连接的实时状态——连接断开时不会静默
+切回旧表，而是把有效映射标为「连接未确认」并拒绝执行计划。
+
+聚合计划（`GET /api/data_aggregate/{id}/compute-plan`）只从去重清单取有效映射，
+并在计划里固化映射编号、连接与源表快照；无法确认有效连接时计划不可执行。
+`POST /api/data_aggregate/{id}/execute` 执行计划并落一条结果记录，
+`GET /api/data_aggregate/{id}/results` 可查回每条结果生成时使用的来源映射——
+历史结果不会被后续裁决改写。
+
 领域：数据工程
 子方向：数据分析与数据应用

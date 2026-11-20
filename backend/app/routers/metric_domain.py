@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services.metric_domain import MetricDomainService
+from app.services.domain_mapping import domain_mapping_service
 
 router = APIRouter(prefix="/api/metric_domain", tags=["指标域管理"])
 
@@ -65,6 +66,28 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="metric_domain.csv"'})
 
 
+@router.get("/mapping/dedup-list", response_model=dict)
+def get_dedup_list() -> dict:
+    """指标域去重清单：每个域编号只给出一个有效映射，重复项与冲突全部可见。"""
+    return domain_mapping_service.build_dedup_list()
+
+
+@router.post("/mapping/adjudicate", response_model=dict)
+def adjudicate_mappings() -> dict:
+    """批量检查存量重复域并落定裁决，重复调用不会改变结果。"""
+    result = domain_mapping_service.apply_adjudication()
+    return {"ok": True, "message": "存量重复域已完成裁决", **result}
+
+
+@router.get("/mapping/{mapping_code}", response_model=dict)
+def get_mapping(mapping_code: str) -> dict:
+    """读取单条映射，用于追溯既有聚合结果生成时使用的来源。"""
+    mapping = domain_mapping_service.get_mapping(mapping_code)
+    if mapping is None:
+        raise HTTPException(status_code=404, detail=f"指标域映射 {mapping_code} 不存在")
+    return mapping
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条指标域明细；不存在时给出可读的错误说明。"""
@@ -76,10 +99,10 @@ def get_entry(entry_id: int) -> dict:
 
 @router.post("", response_model=ActionResult)
 def create_entry(payload: dict[str, object]) -> ActionResult:
-    """登记一条指标域，缺字段时说明原因而不是静默丢弃。"""
-    entry, missing = service.create_entry(payload)
-    if missing:
-        return ActionResult(ok=False, message=f"缺少必填字段：{'、'.join(missing)}")
+    """登记一条指标域；同一域编号只允许登记一次，重复时说明原因。"""
+    entry, errors = service.create_entry(payload)
+    if entry is None:
+        return ActionResult(ok=False, message="；".join(errors))
     return ActionResult(ok=True, message="指标域已登记", entry=entry)
 
 

@@ -108,3 +108,20 @@ def get_preview_sql(entry_id: int) -> dict:
     calc = MetricCalculator()
     sql = calc.preview_sql(entry_id)
     return {"aggregate_id": entry_id, "sql": sql}
+
+
+@router.post("/{entry_id}/execute", response_model=ActionResult)
+def execute_plan(entry_id: int) -> ActionResult:
+    """执行聚合计划并落结果；无法确认有效连接时拒绝执行。"""
+    result, message = service.execute(entry_id)
+    if result is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=result.get("result"))
+
+
+@router.get("/{entry_id}/results", response_model=dict)
+def list_results(entry_id: int) -> dict:
+    """列出该聚合配置的历史结果；每条结果带生成时的来源映射快照。"""
+    from app.services.aggregate_result import list_results as _list
+    rows = _list(entry_id)
+    return {"aggregate_id": entry_id, "items": rows, "total": len(rows)}
